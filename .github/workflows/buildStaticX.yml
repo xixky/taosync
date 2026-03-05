@@ -93,11 +93,11 @@ jobs:
               # 1. 安装基础系统依赖
               apt-get update && apt-get install -y build-essential zlib1g-dev patchelf && rm -rf /var/lib/apt/lists/*
               
-              # 2. 升级 pip 并预装所有可能的构建后端 (避免 BackendUnavailable 错误)
+              # 2. 升级 pip 并预装所有可能的构建后端
               python -m pip install --upgrade pip
               python -m pip install setuptools wheel scons hatchling
               
-              # 3. 安装打包工具 (使用 --no-build-isolation 以复用已安装的后端工具)
+              # 3. 安装打包工具
               python -m pip install --no-build-isolation "pyinstaller>=6,<7" staticx
               
               # 4. 安装项目业务依赖
@@ -113,15 +113,14 @@ jobs:
                 --noconfirm
                 
               # 6. 使用 StaticX 进行全静态封装
-              # 这一步会将二进制文件与 glibc 捆绑，使其能在 alpine 或旧版 linux 上运行
               echo "Starting StaticX packaging..."
-              staticx "/app/dist/${{ matrix.platform }}/$APP_NAME" "/app/dist/${{ matrix.platform }}/${APP_NAME}_static"
+              staticx "/app/dist/${{ matrix.platform }}/$APP_NAME" "/app/dist/${{ matrix.platform }}/${APP_NAME}_StaticX"
               
-              # 替换为静态版本
-              mv -f "/app/dist/${{ matrix.platform }}/${APP_NAME}_static" "/app/dist/${{ matrix.platform }}/$APP_NAME"
+              # 替换为 StaticX 版本
+              mv -f "/app/dist/${{ matrix.platform }}/${APP_NAME}_StaticX" "/app/dist/${{ matrix.platform }}/$APP_NAME"
               chmod +x "/app/dist/${{ matrix.platform }}/$APP_NAME"
 
-              # 7. 权限修复：将 root 创建的文件交还给 GitHub Runner 用户 (UID 1001)
+              # 7. 权限修复
               chown -R 1001:121 /app/dist
               chmod -R 755 /app/dist
               echo "Build complete."
@@ -129,7 +128,7 @@ jobs:
 
       - name: 压缩产物
         run: |
-          # 验证文件是否存在并打包
+          # 验证文件是否存在并打包，文件名改为 StaticX
           ls -la dist/${{ matrix.platform }}/
           tar -czf "${{ env.APP_NAME }}-linux-StaticX-${{ matrix.platform }}.tar.gz" -C "dist/${{ matrix.platform }}" .
 
