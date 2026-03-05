@@ -1,0 +1,171 @@
+name: buildglibclinux
+
+on:
+  workflow_dispatch:
+
+env:
+  APP_NAME: taoSync
+
+jobs:
+  get-version:
+    name: 获取版本号
+    runs-on: ubuntu-latest
+    outputs:
+      VERSION: ${{ steps.getVersion.outputs.VERSION }}
+
+    steps:
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
+
+      - id: getVersion
+        name: 获取版本号
+        run: |
+          versions=$(head -n 1 version.txt)
+          IFS=',' read -ra versionList <<< "$versions"
+          cuVersion="${versionList[0]}"
+          echo "VERSION=$cuVersion" >> "$GITHUB_OUTPUT"
+          
+  build-frontend:
+    name: 构建前端
+    runs-on: ubuntu-latest
+    needs: [ get-version ]
+    env:
+      VERSION: ${{ needs.get-version.outputs.VERSION }}
+
+    steps:
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
+
+      - name: 安装Node.js 14.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: "14.x"
+
+      - name: 安装依赖并构建前端
+        run: |
+          sed -i "s/__version_placeholder__/$VERSION/g" frontend/src/views/page/setting/index.vue
+          cd frontend
+          npm install
+          npm run build
+          
+      - name: 上传artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 1
+
+  build-linux:
+    name: 构建Linux多平台 (StaticX 静态封装)
+    runs-on: ubuntu-latest
+    needs: [ get-version, build-frontend ]
+    env:
+      VERSION: ${{ needs.get-version.outputs.VERSION }}
+    strategy:
+      matrix:
+        # 定义目标平台
+        platform: [ "amd64", "arm64", "arm32" ]
+          
+    steps:
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
+
+      - name: 下载前端构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: 设置 QEMU (用于跨架构构建)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
+
+      - name: 设置目标平台变量
+        id: set-platform
+        run: |
+          case "${{ matrix.platform }}" in
+            amd64)   TARGET_ARCH="amd64" ;;
+            arm64)   TARGET_ARCH="arm64" ;;
+            arm32)   TARGET_ARCH="arm/v7" ;;
+          esac
+          echo "TARGET_ARCH=$TARGET_ARCH" >> $GITHUB_ENV
+          echo "TARGET_PLATFORM=${{ matrix.platform }}" >> $GITHUB_ENV
+          
+      - name: 在 Docker 容器中进行静态化构建
+        run: |
+          # 动态选择基础镜像
+          case "${{ matrix.platform }}" in
+            amd64)   BASE_IMAGE="python:3.11-slim-bullseye" ;;
+            arm64)   BASE_IMAGE="arm64v8/python:3.11-slim-bullseye" ;;
+            arm32)   BASE_IMAGE="arm32v7/python:3.11-slim-bullseye" ;;
+          esac
+          
+          # 动态设置库路径
+          case "${{ matrix.platform }}" in
+            amd64)   LIB_PATH="/usr/lib/x86_64-linux-gnu" ;;
+            arm64)   LIB_PATH="/usr/lib/aarch64-linux-gnu" ;;
+            arm32)   LIB_PATH="/usr/lib/arm-linux-gnueabihf" ;;
+          esac
+          
+          echo "Using Base Image: $BASE_IMAGE for $TARGET_ARCH"
+          
+          docker run --rm \
+            --platform linux/${{ env.TARGET_ARCH }} \
+            -v "$(pwd):/app" \
+            -w /app \
+            -e APP_NAME=${{ env.APP_NAME }} \
+            -e LIB_PATH=$LIB_PATH \
+            -e TARGET_PLATFORM=${{ env.TARGET_PLATFORM }} \
+            $BASE_IMAGE \
+            sh -c '
+              set -e
+              
+              # 1. 安装构建依赖 (patchelf 是 staticx 的核心依赖)
+              apt-get update && apt-get install -y build-essential zlib1g-dev patchelf && rm -rf /var/lib/apt/lists/*
+              
+              # 2. 升级 pip 并安装打包工具
+              python -m pip install --no-cache-dir --upgrade pip
+              python -m pip install --no-cache-dir "pyinstaller>=6,<7" staticx
+              
+              # 3. 安装项目依赖
+              if [ -f requirements.txt ]; then
+                python -m pip install --no-cache-dir -r requirements.txt
+              fi
+              
+              # 4. 修复库路径并执行 PyInstaller 构建
+              export LD_LIBRARY_PATH=/usr/local/lib:$LIB_PATH
+              python -m PyInstaller "$APP_NAME.spec" \
+                --distpath "/app/dist/$TARGET_PLATFORM" \
+                --workpath "/app/build/$TARGET_PLATFORM" \
+                --noconfirm
+                
+              # 5. 使用 StaticX 进行全静态化封装
+              # 封装后的文件将不依赖宿主系统的 glibc
+              EXE_PATH="/app/dist/$TARGET_PLATFORM/$APP_NAME"
+              STATIC_EXE_PATH="/app/dist/$TARGET_PLATFORM/${APP_NAME}_static"
+              
+              echo "Starting StaticX packaging..."
+              staticx "$EXE_PATH" "$STATIC_EXE_PATH"
+              
+              # 用静态化的版本替换原有版本
+              mv -f "$STATIC_EXE_PATH" "$EXE_PATH"
+              chmod +x "$EXE_PATH"
+              
+              # 6. 【核心修复】修改权限，防止宿主机 tar 报错 Permission Denied
+              # 将 dist 目录的所有权改回宿主机当前用户
+              chown -R $(id -u):$(id -g) /app/dist/$TARGET_PLATFORM
+              echo "Build and Permission Fix completed."
+            '
+      
+      - name: 打包为 tar.gz
+        run: |
+          # 此时宿主机用户已经拥有读取权限
+          tar -czf "taoSync-linux-static-${{ env.TARGET_PLATFORM }}.tar.gz" -C "dist/${{ env.TARGET_PLATFORM }}" .
+                
+      - name: 上传 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: taoSync-linux-static-${{ env.TARGET_PLATFORM }}
+          path: taoSync-linux-static-${{ env.TARGET_PLATFORM }}.tar.gz
+          retention-days: 7
