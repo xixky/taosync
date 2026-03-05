@@ -71,7 +71,6 @@ jobs:
 
       - name: 在 Docker 中进行静态打包
         run: |
-          # 根据平台选择镜像和系统库路径
           case "${{ matrix.platform }}" in
             amd64)   IMG="python:3.11-slim-bullseye" ; LIB="/usr/lib/x86_64-linux-gnu" ;;
             arm64)   IMG="arm64v8/python:3.11-slim-bullseye" ; LIB="/usr/lib/aarch64-linux-gnu" ;;
@@ -88,45 +87,43 @@ jobs:
             sh -c '
               set -e
               
-              # 1. 安装系统依赖 (StaticX 需要 patchelf)
+              # 1. 安装系统依赖
               apt-get update && apt-get install -y build-essential zlib1g-dev patchelf && rm -rf /var/lib/apt/lists/*
               
-              # 2. 预安装构建工具 (修复 pkg_resources 缺失和 staticx 编译失败)
+              # 2. 升级 pip 并安装基础构建工具
               python -m pip install --upgrade pip
               python -m pip install setuptools wheel scons
               
-              # 3. 安装 PyInstaller, StaticX 及项目依赖
-              python -m pip install "pyinstaller>=6,<7" staticx
+              # 3. 安装 StaticX 和 PyInstaller
+              # 关键修复：使用 --no-build-isolation 避免临时的隔离构建环境找不到 setuptools
+              python -m pip install --no-build-isolation "pyinstaller>=6,<7" staticx
+              
+              # 4. 安装项目依赖
               if [ -f requirements.txt ]; then
                 python -m pip install -r requirements.txt
               fi
               
-              # 4. PyInstaller 构建
+              # 5. PyInstaller 构建
               export LD_LIBRARY_PATH=/usr/local/lib:$LIB_PATH
               python -m PyInstaller "$APP_NAME.spec" \
                 --distpath "/app/dist/${{ matrix.platform }}" \
                 --workpath "/app/build/${{ matrix.platform }}" \
                 --noconfirm
                 
-              # 5. StaticX 全静态封装 (消除对目标系统 GLIBC 版本的依赖)
+              # 6. StaticX 静态化封装
               echo "Starting StaticX packaging..."
               staticx "/app/dist/${{ matrix.platform }}/$APP_NAME" "/app/dist/${{ matrix.platform }}/${APP_NAME}_static"
               
-              # 覆盖原文件并赋予执行权限
               mv -f "/app/dist/${{ matrix.platform }}/${APP_NAME}_static" "/app/dist/${{ matrix.platform }}/$APP_NAME"
               chmod +x "/app/dist/${{ matrix.platform }}/$APP_NAME"
 
-              # 6. 【核心修复】解决权限不足问题
-              # GitHub Actions 宿主机用户 UID 为 1001, GID 为 121
+              # 7. 权限修复 (GitHub Actions 默认 1001:121)
               chown -R 1001:121 /app/dist
               chmod -R 755 /app/dist
-              echo "Build finished successfully."
             '
 
       - name: 压缩并打包
         run: |
-          # 验证权限和文件是否存在
-          ls -la dist/${{ matrix.platform }}/
           tar -czf "${{ env.APP_NAME }}-linux-static-${{ matrix.platform }}.tar.gz" -C "dist/${{ matrix.platform }}" .
 
       - name: 上传产物
