@@ -86,7 +86,13 @@ jobs:
             $IMG \
             sh -c '
               set -e
-              apt-get update && apt-get install -y build-essential zlib1g-dev patchelf zip && rm -rf /var/lib/apt/lists/*
+              apt-get update && apt-get install -y --no-install-recommends \
+                build-essential \
+                zlib1g-dev \
+                patchelf \
+                binutils \
+                zip \
+                && rm -rf /var/lib/apt/lists/*
               
               python -m pip install --upgrade pip
               python -m pip install setuptools wheel scons hatchling
@@ -121,3 +127,4 @@ jobs:
         with:
           name: ${{ env.APP_NAME }}-linux-StaticX-${{ matrix.platform }}
           path: ${{ env.APP_NAME }}-linux-StaticX-${{ matrix.platform }}.zip
+          retention-days: 90
